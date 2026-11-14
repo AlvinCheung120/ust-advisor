@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>[hidden]{display:none!important} body{margin:0} img{max-width:100%}</style>
+</head>
+<body>
+<title>UST → Hang Hau Advisor</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<!--
+  Bus, Minibus or Taxi? – HKUST North → Hang Hau departure advisor · COMP1945 Group 23
+  Local run: `python3 -m http.server 8000` in this folder, open http://localhost:8000 (live ETAs work there).
+  Published as a claude.ai artifact, outside APIs are blocked by the page sandbox, so the page falls back
+  to typed-in ETAs. Model coefficients come from the KNIME Linear Regression Learner (../knime/results.md).
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<style>
+/* Layout: route-sign header, then a two-column console — trip planner left, LED departure board + reasoning right. */
+:root {
+  --paper: #eef2ef; --surface: #ffffff; --ink: #14201a; --muted: #5a6a61; --line: #d5ddd8;
+  --board: #101814; --board-line: #24312b; --led: #ffb21a; --led-dim: #8a6a2a; --board-ink: #e9efe9;
+  --bus: #c8102e; --mini: #0a7a4c; --taxi: #3f4b45; --accent: #0a7a4c;
+  --ok: #0a7a4c; --ok-bg: #dcefe5; --bad: #b42318; --bad-bg: #fbe3df; --warn-bg: #fff3d6; --warn-ink: #7a4b00;
+  --display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --body: "Barlow", "Helvetica Neue", Arial, sans-serif;
+  --r: 14px;
+  /* verdict banners keep white text in both themes */
+  --v-91M: #c8102e; --v-11M: #0a7a4c; --v-Taxi: #3a4640; --v-late: #9f1d14;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --paper: #0d1311; --surface: #151d19; --ink: #e5ece8; --muted: #95a59c; --line: #26322c;
+  --board: #070b09; --board-line: #1c2621; --ok: #3fbf86; --ok-bg: #133024; --bad: #ff7a6b; --bad-bg: #3a1714;
+  --warn-bg: #3a2d0e; --warn-ink: #ffd27a; --mini: #19a46a; --bus: #e5384f; --taxi: #8a9a91; --accent: #19a46a; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --paper: #0d1311; --surface: #151d19; --ink: #e5ece8; --muted: #95a59c; --line: #26322c;
+  --board: #070b09; --board-line: #1c2621; --ok: #3fbf86; --ok-bg: #133024; --bad: #ff7a6b; --bad-bg: #3a1714;
+  --warn-bg: #3a2d0e; --warn-ink: #ffd27a; --mini: #19a46a; --bus: #e5384f; --taxi: #8a9a91; --accent: #19a46a; color-scheme: dark }
+
+* { box-sizing: border-box; }
+body { background: var(--paper); color: var(--ink); font: 16px/1.5 var(--body); }
+.wrap { max-width: 1180px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.num { font-variant-numeric: tabular-nums; }
+h1, h2, h3 { font-family: var(--display); font-weight: 700; letter-spacing: .01em; text-wrap: balance; margin: 0; }
+.label { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 3px solid var(--led); outline-offset: 2px; }
+
+/* header: a route sign */
+.sign { background: var(--board); color: var(--board-ink); }
+.sign .wrap { padding-block: 22px 20px; display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: end; justify-content: space-between; }
+.route { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.route h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1; }
+.route .zh { font-family: var(--body); font-size: 14px; color: #9fb0a7; display: block; margin-top: 6px; letter-spacing: .02em; }
+.arrow { font-family: var(--display); color: var(--led); font-size: 34px; line-height: 1; }
+.badges { display: flex; gap: 8px; }
+.badge { font-family: var(--display); font-weight: 700; font-size: 15px; padding: 3px 10px; border-radius: 6px; color: #fff; line-height: 1.3; }
+.b-91M { background: var(--bus); } .b-11M { background: var(--mini); } .b-Taxi { background: var(--taxi); }
+.clock { font-family: var(--display); color: var(--led); font-size: 28px; letter-spacing: .04em; text-shadow: 0 0 12px rgba(255,178,26,.35); }
+
+main.wrap { padding-block: 28px 56px; display: grid; gap: 24px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 960px) { main.wrap { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); align-items: start; } }
+.col { display: grid; gap: 20px; min-width: 0; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 20px; display: grid; gap: 16px; min-width: 0; }
+.panel h2 { font-size: 24px; }
+.row { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+.field { display: grid; gap: 6px; min-width: 0; }
+.field > span { font-size: 14px; font-weight: 500; }
+.input { width: 100%; background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-height: 44px; }
+.input:focus { border-color: var(--accent); }
+.hint { font-size: 12px; color: var(--muted); }
+
+/* big target time */
+.target input { font-family: var(--display); font-size: 40px; font-weight: 600; padding: 4px 12px; text-align: left; }
+
+/* queue steppers */
+.queue { border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; background: var(--paper); min-width: 0; }
+.qhead { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.stepper { display: flex; align-items: center; gap: 6px; }
+.stepper button, .stepper input { color: var(--ink); }
+.stepper button { width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); font-size: 20px; cursor: pointer; }
+.stepper button:hover { border-color: var(--accent); }
+.stepper input { width: 72px; text-align: center; font-family: var(--display); font-size: 26px; font-weight: 600; border: 0; background: transparent; }
+.vehicles { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.veh { height: 18px; min-width: 34px; border-radius: 5px 5px 3px 3px; border: 2px solid var(--line); position: relative; }
+.veh.full { background: var(--line); }
+.veh.mine { border-color: currentColor; background: currentColor; }
+.veh.mine::after { content: "you"; position: absolute; inset: -1px 0 0; font: 600 10px/16px var(--body); color: #fff; text-align: center; }
+.qnote { font-size: 13px; color: var(--muted); }
+
+details.more { border-top: 1px solid var(--line); padding-top: 12px; }
+details.more summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+details.more .row { margin-top: 12px; }
+.toggle { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+.toggle input { width: 18px; height: 18px; accent-color: var(--accent); }
+
+/* live data */
+.live dl { margin: 0; display: grid; gap: 8px; }
+.live dl > div { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; border-bottom: 1px dashed var(--line); padding-bottom: 6px; }
+.live dd { margin: 0; font-weight: 600; text-align: right; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; }
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pill.on { background: var(--ok-bg); color: var(--ok); } .pill.off { background: var(--warn-bg); color: var(--warn-ink); }
+.linkbtn { background: none; border: 0; color: var(--accent); font-weight: 600; cursor: pointer; padding: 0; }
+
+/* verdict + departure board */
+.verdict { border-radius: var(--r); padding: 22px 22px 20px; color: #fff; background: var(--v-Taxi); display: grid; gap: 6px; }
+.verdict .label { color: rgba(255,255,255,.8); }
+.verdict h2 { font-size: clamp(34px, 5vw, 52px); line-height: 1; }
+.verdict p { margin: 0; font-size: 15px; opacity: .95; }
+.board { background: var(--board); border-radius: var(--r); padding: 8px 0; overflow-x: auto; box-shadow: inset 0 0 0 1px var(--board-line); }
+.board table { width: 100%; border-collapse: collapse; min-width: 520px; color: var(--led); font-family: var(--display); }
+.board th { font: 600 11px/1 var(--body); letter-spacing: .1em; text-transform: uppercase; color: var(--led-dim); text-align: left; padding: 10px 14px; }
+.board td { padding: 12px 14px; border-top: 1px solid var(--board-line); font-size: 22px; font-weight: 600; white-space: nowrap; text-shadow: 0 0 10px rgba(255,178,26,.25); }
+.board td.dest { color: var(--board-ink); font-size: 18px; font-weight: 500; text-shadow: none; }
+.board td.dest small { display: block; font: 12px var(--body); color: #8fa097; }
+.board tr.best td { background: rgba(255,178,26,.07); }
+.board tr.best td:first-child { box-shadow: inset 4px 0 0 var(--led); }
+.st { font-size: 14px; letter-spacing: .06em; }
+.st.ok { color: #6be3a5; } .st.late { color: #ff8a7a; }
+.blink { animation: blink 1.4s steps(2, start) infinite; }
+@keyframes blink { to { visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) { .blink { animation: none; } }
+.legend { font-size: 13px; color: var(--muted); }
+
+.warn { background: var(--warn-bg); color: var(--warn-ink); border-radius: 12px; padding: 12px 14px; font-size: 14px; }
+
+/* explanation bars */
+.tabs { display: flex; gap: 8px; flex-wrap: wrap; }
+.tab { border: 1px solid var(--line); background: var(--paper); border-radius: 999px; padding: 6px 14px; cursor: pointer; font-weight: 600; font-size: 14px; }
+.tab[aria-selected="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.explain { display: grid; gap: 18px; }
+.explain h3 { font-size: 19px; display: flex; justify-content: space-between; gap: 8px; }
+.bars { display: grid; gap: 6px; }
+.bar { display: grid; grid-template-columns: minmax(0, 11rem) minmax(0, 1fr) 4.2rem; gap: 10px; align-items: center; font-size: 13px; }
+.bar .track { height: 12px; position: relative; background: var(--paper); border-radius: 3px; }
+.bar .track i { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+.bar .track::before { content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--muted); opacity: .5; }
+.bar .v { text-align: right; font-weight: 600; }
+.bar.total { border-top: 1px solid var(--line); padding-top: 6px; font-weight: 600; }
+.pos { background: var(--bad); } .neg { background: var(--ok); }
+.small { font-size: 13px; color: var(--muted); margin: 0; }
+
+.compare { width: 100%; border-collapse: collapse; font-size: 14px; }
+.compare th { text-align: left; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.compare td { padding: 8px; border-bottom: 1px solid var(--line); }
+.compare td.r, .compare th.r { text-align: right; }
+.scroll { overflow-x: auto; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
+.stat { border-left: 3px solid var(--accent); padding: 2px 0 2px 12px; }
+.stat b { font-family: var(--display); font-size: 28px; display: block; line-height: 1.1; }
+.stat span { font-size: 12px; color: var(--muted); }
+footer { font-size: 12px; color: var(--muted); }
+</style>
+
+<header class="sign">
+  <div class="wrap">
+    <div class="route">
+      <div><h1>HKUST North</h1><span class="zh">香港科技大學 (北)</span></div>
+      <span class="arrow" aria-hidden="true">→</span>
+      <div><h1>Hang Hau Station</h1><span class="zh">坑口站</span></div>
+      <div class="badges" aria-label="Options"><span class="badge b-91M">91M</span><span class="badge b-11M">11M</span><span class="badge b-Taxi">TAXI</span></div>
+    </div>
+    <div class="clock num" id="clock" aria-label="Current time"></div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="col" aria-label="Trip planner">
+    <form class="panel" id="plan" autocomplete="off">
+      <h2>Plan your trip</h2>
+      <label class="field target"><span>Be at Hang Hau Station by</span>
+        <input class="input num" id="target" type="time" required>
+      </label>
+
+      <div class="queue" style="color: var(--mini)">
+        <div class="qhead"><span><span class="badge b-11M">11M</span> <b style="color:var(--ink)">minibus queue</b></span>
+          <div class="stepper"><button type="button" data-step="q11:-1" aria-label="One fewer person">−</button><input id="q11" class="num" type="number" min="0" max="300" value="14" aria-label="People ahead in 11M queue"><button type="button" data-step="q11:1" aria-label="One more person">+</button></div></div>
+        <div class="vehicles" id="v11"></div><div class="qnote" id="n11"></div>
+      </div>
+      <div class="queue" style="color: var(--bus)">
+        <div class="qhead"><span><span class="badge b-91M">91M</span> <b style="color:var(--ink)">bus queue</b></span>
+          <div class="stepper"><button type="button" data-step="q91:-1" aria-label="One fewer person">−</button><input id="q91" class="num" type="number" min="0" max="300" value="12" aria-label="People ahead in 91M queue"><button type="button" data-step="q91:1" aria-label="One more person">+</button></div></div>
+        <div class="vehicles" id="v91"></div><div class="qnote" id="n91"></div>
+      </div>
+      <p class="hint" style="margin:0">Count the people ahead of you in each line. The queues above are example values.</p>
+
+      <details class="more">
+        <summary>Time, margin and taxi settings</summary>
+        <div class="row">
+          <label class="field"><span>Leaving at</span><input class="input num" id="depart" type="time"><span class="hint">Blank = now</span></label>
+          <label class="field"><span>Day</span><select class="input" id="dayType"><option value="auto">Today</option><option value="0">Weekday</option><option value="1">Weekend</option></select></label>
+          <label class="field"><span>Safety margin (min)</span><input class="input num" id="margin" type="number" min="0" max="30"></label>
+          <label class="field"><span>Time to get a taxi (min)</span><input class="input num" id="taxiWait" type="number" min="0" max="60"></label>
+        </div>
+      </details>
+    </form>
+
+    <section class="panel live" aria-label="Live data">
+      <div class="qhead"><h2>Live data</h2><span id="livePill" class="pill off">Checking…</span></div>
+      <dl>
+        <div><dt>Next 91M at HKUST North</dt><dd id="eta91" class="num">–</dd></div>
+        <div><dt>Next 11M departures</dt><dd id="eta11" class="num">–</dd></div>
+        <div><dt>Rain, Sai Kung, past hour</dt><dd id="rainTxt" class="num">–</dd></div>
+        <div><dt>Weather warnings</dt><dd id="warnTxt">–</dd></div>
+      </dl>
+      <div id="manual" class="row" hidden>
+        <label class="field"><span>Next 91M in (min)</span><input class="input num" id="m91" type="number" min="0" max="90" placeholder="from KMB app"></label>
+        <label class="field"><span>Next 11M in (min)</span><input class="input num" id="m11" type="number" min="0" max="90" placeholder="optional"></label>
+      </div>
+      <label class="toggle"><input type="checkbox" id="rainOverride"> It is raining now</label>
+      <p class="hint" id="liveNote" style="margin:0"></p>
+      <div><button type="button" class="linkbtn" id="refresh">Refresh live data</button></div>
+    </section>
+  </section>
+
+  <section class="col" aria-label="Recommendation">
+    <div class="verdict" id="verdict" aria-live="polite">
+      <span class="label">Our advice</span>
+      <h2 id="recTitle">Set your arrival time</h2>
+      <p id="recSub"></p>
+    </div>
+
+    <div class="board" role="region" aria-label="Predicted arrivals">
+      <table>
+        <thead><tr><th>Route</th><th>To</th><th>Board in</th><th>Ride</th><th>Arrive</th><th>Status</th></tr></thead>
+        <tbody id="boardBody"></tbody>
+      </table>
+    </div>
+    <p class="legend" id="legend" style="margin:-8px 0 0"></p>
+    <div class="warn" id="coverage" hidden></div>
+
+    <section class="panel" aria-label="Explanation">
+      <div class="qhead"><h2>Why this answer</h2><div class="tabs" role="tablist" id="tabs"></div></div>
+      <div class="explain" id="explain"></div>
+    </section>
+
+    <section class="panel" aria-label="Model comparison">
+      <h2>Second opinion: nearest past trips</h2>
+      <p class="small">K-nearest neighbours finds the 7 past trips most like yours (same route, same queue size, same time of day) and averages how long those people waited.</p>
+      <div class="scroll"><table class="compare num" id="knnTable"><tr><td>Loading past trips…</td></tr></table></div>
+      <p class="hint" id="knnNote" style="margin:0"></p>
+      <label class="field" id="knnUpload" hidden><span>Load <code>model_data.csv</code> to switch this on</span><input type="file" id="csv" accept=".csv"></label>
+    </section>
+
+    <section class="panel" aria-label="How good is the model">
+      <h2>How accurate is it?</h2>
+      <div class="stats">
+        <div class="stat"><b class="num">±4.8 min</b><span>typical waiting-time error (RMSE, 38 test trips)</span></div>
+        <div class="stat"><b class="num">0.51</b><span>R² for waiting time (simple rule: 0.41)</span></div>
+        <div class="stat"><b class="num">±1.8 min</b><span>typical ride-time error</span></div>
+        <div class="stat"><b class="num">186</b><span>trips used: 2 observed, 184 simulated from our ETA logger</span></div>
+      </div>
+      <footer>Models trained in KNIME (linear regression; MLP and KNN compared). Driving time is a typical value from our data, not live traffic. Few rainy trips in the data, so the rain effect is uncertain. Live data: KMB and Transport Department ETA APIs and the Hong Kong Observatory via DATA.GOV.HK. COMP1945 Group 23.</footer>
+    </section>
+  </section>
+</main>
+
+<script>
+// ============================== CONFIG (from KNIME) ==============================
+const CONFIG = {
+  capacity: { "11M": 16, "91M": 30 },
+  headway: {
+    "91M": { "Off-peak": [16.0, 15.0], "Evening peak": [13.7, 16.0], "Late": [18.6, 21.0] },
+    "11M": { "Off-peak": [7.0, 7.0],  "Evening peak": [8.0, 8.0],  "Late": [8.0, 7.5] } },
+  typicalDrive: { "Off-peak": 9, "Evening peak": 10.5, "Late": 8 },
+  waitModel:  { intercept: -1.849, vehicles_needed: 7.693, typical_headway: -0.421, is_91M: 11.157 },
+  extraModel: { intercept: 2.281, is_91M: 3.283, is_rain: 0.975, evening_peak: 0.195, late: -1.369, is_weekend: -1.610 },
+  defaultSafetyMargin: 3, defaultTaxiWait: 5, knnK: 7,
+  api: {
+    kmb: "https://data.etabus.gov.hk/v1/transport/kmb/eta/B3E60EE895DBBF06/91M/1",
+    gmb: "https://data.etagmb.gov.hk/eta/route-stop/2004825/2/1",
+    rain: "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en",
+    warn: "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=warnsum&lang=en" }
+};
+const NAMES = { "91M": "91M bus", "11M": "11M minibus", "Taxi": "Taxi" };
+
+// ============================== MODEL FUNCTIONS ==============================
+function timeBand(d) {
+  const h = d.getHours() + d.getMinutes() / 60;
+  if (h >= 12 && h < 17) return "Off-peak";
+  if (h >= 17 && h < 19.75) return "Evening peak";
+  return "Late";
+}
+function vehiclesNeeded(q, mode) { return Math.ceil((q + 1) / CONFIG.capacity[mode]); }
+function typicalHeadway(mode, ctx) { return CONFIG.headway[mode][ctx.band][ctx.weekend]; }
+function predictWait(mode, q, ctx) {
+  const m = CONFIG.waitModel, vn = vehiclesNeeded(q, mode), hw = typicalHeadway(mode, ctx), is91 = mode === "91M" ? 1 : 0;
+  const parts = [["Base", m.intercept, 1], [`Vehicles needed (${vn})`, m.vehicles_needed, vn],
+    [`Gap between vehicles (${hw} min)`, m.typical_headway, hw], ["Route is 91M", m.is_91M, is91]];
+  const model = Math.max(0, parts.reduce((s, [, c, x]) => s + c * x, 0));
+  const live = ctx.useLive ? (ctx.eta[mode] || [])[vn - 1] : undefined;
+  const wait = live !== undefined ? Math.max(model, live) : model;
+  return { wait, model, live, vn, hw, parts, usedLive: live !== undefined && live > model };
+}
+function predictExtra(mode, ctx) {
+  const m = CONFIG.extraModel;
+  const parts = [["Base", m.intercept, 1], ["Route is 91M", m.is_91M, mode === "91M" ? 1 : 0], ["Raining", m.is_rain, ctx.rain],
+    ["Evening peak", m.evening_peak, ctx.band === "Evening peak" ? 1 : 0], ["Late evening", m.late, ctx.band === "Late" ? 1 : 0],
+    ["Weekend", m.is_weekend, ctx.weekend]];
+  return { extra: Math.max(0, parts.reduce((s, [, c, x]) => s + c * x, 0)), parts };
+}
+function typicalDrive(ctx) { return CONFIG.typicalDrive[ctx.band] + (ctx.rain ? 1 : 0); }
+function recommend(ctx, q91, q11, target, margin, taxiWait) {
+  const drive = typicalDrive(ctx);
+  const opts = ["11M", "91M"].map(mode => {
+    const w = predictWait(mode, mode === "91M" ? q91 : q11, ctx), e = predictExtra(mode, ctx);
+    const ride = drive + e.extra, total = w.wait + ride;
+    return { mode, w, e, wait: w.wait, ride, total, arrive: addMin(ctx.depart, total) };
+  });
+  opts.push({ mode: "Taxi", wait: taxiWait, ride: drive, total: taxiWait + drive, arrive: addMin(ctx.depart, taxiWait + drive) });
+  const deadline = addMin(target, -margin);
+  opts.forEach(o => { o.slack = (deadline - o.arrive) / 60000; o.ok = o.slack >= 0; });
+  const pt = opts.filter(o => o.mode !== "Taxi" && o.ok).sort((a, b) => a.total - b.total);
+  let pick, status;
+  if (pt.length) { pick = pt[0]; status = "ok"; }
+  else if (opts[2].ok) { pick = opts[2]; status = "taxi"; }
+  else { pick = [...opts].sort((a, b) => a.total - b.total)[0]; status = "late"; }
+  return { opts, pick, status, drive, deadline };
+}
+
+// KNN (L5): min-max scaled [vehicles_needed, typical_headway, is_91M], Euclidean distance, mean wait of K nearest
+let KNN = null;
+function buildKNN(rows) {
+  const pts = rows.map(r => ({ x: [+r.vehicles_needed, +r.typical_headway, r.mode === "91M" ? 1 : 0], y: +r.wait_min }))
+    .filter(p => p.x.every(Number.isFinite) && Number.isFinite(p.y));
+  if (!pts.length) return null;
+  const lo = [0, 1, 2].map(i => Math.min(...pts.map(p => p.x[i]))), hi = [0, 1, 2].map(i => Math.max(...pts.map(p => p.x[i])));
+  const sc = x => x.map((v, i) => (v - lo[i]) / ((hi[i] - lo[i]) || 1));
+  pts.forEach(p => p.s = sc(p.x));
+  return { n: pts.length, predict(x) {
+    const s = sc(x);
+    const nn = pts.map(p => ({ p, d: Math.hypot(...p.s.map((v, i) => v - s[i])) })).sort((a, b) => a.d - b.d).slice(0, CONFIG.knnK);
+    return { wait: nn.reduce((a, b) => a + b.p.y, 0) / nn.length, nn };
+  } };
+}
+
+// ============================== LIVE DATA ==============================
+const LIVE = { eta: { "91M": [], "11M": [] }, rain: null, warn: [], ok: false };
+function getJSON(u) {
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 6000);
+  return fetch(u, { signal: ctl.signal }).then(r => { clearTimeout(t); if (!r.ok) throw new Error(r.status); return r.json(); });
+}
+async function loadLive() {
+  $("livePill").className = "pill off"; $("livePill").textContent = "Checking…";
+  const now = Date.now(); let okCount = 0;
+  await Promise.all([
+    getJSON(CONFIG.api.kmb).then(j => { LIVE.eta["91M"] = j.data.filter(d => d.dir === "I" && d.eta).map(d => Math.max(0, (new Date(d.eta) - now) / 60000)).sort((a, b) => a - b); okCount++; }).catch(() => {}),
+    getJSON(CONFIG.api.gmb).then(j => { LIVE.eta["11M"] = (j.data.eta || []).map(e => e.timestamp ? Math.max(0, (new Date(e.timestamp) - now) / 60000) : e.diff).sort((a, b) => a - b); okCount++; }).catch(() => {}),
+    getJSON(CONFIG.api.rain).then(j => { const sk = j.rainfall.data.find(d => d.place === "Sai Kung"); LIVE.rain = sk ? sk.max : 0; okCount++; }).catch(() => {}),
+    getJSON(CONFIG.api.warn).then(j => { LIVE.warn = Object.values(j || {}).map(w => w.name); okCount++; }).catch(() => {}),
+  ]);
+  LIVE.ok = okCount > 0;
+  const fmt = a => a.length ? a.slice(0, 3).map(v => `${v.toFixed(0)}′`).join("  ") : "no service now";
+  if (LIVE.ok) {
+    $("livePill").className = "pill on"; $("livePill").textContent = `Live · ${hhmm(new Date())}`;
+    $("eta91").textContent = fmt(LIVE.eta["91M"]); $("eta11").textContent = fmt(LIVE.eta["11M"]);
+    $("rainTxt").textContent = LIVE.rain === null ? "–" : `${LIVE.rain} mm`;
+    $("warnTxt").textContent = LIVE.warn.length ? LIVE.warn.join(", ") : "None";
+    $("liveNote").textContent = "Live ETAs set a floor: if the vehicle you'll board is due later than the model says, we use the later time.";
+    $("manual").hidden = true;
+  } else {
+    $("livePill").textContent = "Offline";
+    ["eta91", "eta11", "rainTxt", "warnTxt"].forEach(id => $(id).textContent = "not available here");
+    $("liveNote").textContent = "This page can't reach the bus and weather servers from here. Type the next arrival from the KMB or minibus app if you have it; the model works without it.";
+    $("manual").hidden = false;
+  }
+}
+
+// ============================== UI ==============================
+const $ = id => document.getElementById(id);
+const pad = n => String(n).padStart(2, "0");
+const hhmm = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const addMin = (d, m) => new Date(d.getTime() + m * 60000);
+function atTime(str, base) { const [h, m] = str.split(":").map(Number); const d = new Date(base); d.setHours(h, m, 0, 0); return d; }
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function context() {
+  const now = new Date();
+  const depart = $("depart").value ? atTime($("depart").value, now) : now;
+  const weekend = $("dayType").value === "auto" ? ([0, 6].includes(now.getDay()) ? 1 : 0) : +$("dayType").value;
+  const rain = $("rainOverride").checked || (LIVE.rain || 0) > 0 ? 1 : 0;
+  const useLive = !$("depart").value;
+  const eta = LIVE.ok ? LIVE.eta : { "91M": $("m91").value !== "" ? [+$("m91").value] : [], "11M": $("m11").value !== "" ? [+$("m11").value] : [] };
+  return { depart, weekend, rain, band: timeBand(depart), eta, useLive };
+}
+
+function drawQueue(mode, q) {
+  const cap = CONFIG.capacity[mode], vn = vehiclesNeeded(q, mode), id = mode === "91M" ? "91" : "11";
+  const shown = Math.min(vn, 8);
+  $("v" + id).innerHTML = Array.from({ length: shown }, (_, i) => `<span class="veh ${i === shown - 1 ? "mine" : "full"}" title="${i === shown - 1 ? "Your vehicle" : "Fills before you"}"></span>`).join("") + (vn > 8 ? `<span class="hint">…${vn} vehicles</span>` : "");
+  $("n" + id).textContent = vn === 1 ? `You fit on the next ${mode === "91M" ? "bus" : "minibus"} (${cap} ${mode === "91M" ? "free spaces assumed" : "seats"}).`
+    : `${vn - 1} ${mode === "91M" ? "bus" : "minibus"}${vn > 2 ? "es" : ""} fill${vn === 2 ? "s" : ""} up before you. You board #${vn}.`;
+}
+
+let lastR = null, activeTab = null, tabChosen = false;
+function run() {
+  const q91 = Math.max(0, Math.round(+$("q91").value || 0)), q11 = Math.max(0, Math.round(+$("q11").value || 0));
+  drawQueue("91M", q91); drawQueue("11M", q11);
+  const ctx = context();
+  if (!$("target").value) { $("recTitle").textContent = "Set your arrival time"; return; }
+  let target = atTime($("target").value, ctx.depart);
+  if (target < ctx.depart) target = addMin(target, 24 * 60);
+  const margin = Math.max(0, +$("margin").value || 0), taxiWait = Math.max(0, +$("taxiWait").value || 0);
+  const R = recommend(ctx, q91, q11, target, margin, taxiWait); lastR = R;
+
+  $("verdict").style.background = R.status === "late" ? "var(--v-late)" : `var(--v-${R.pick.mode})`;
+  $("recTitle").textContent = R.status === "late" ? "You'll be late either way" : `Take the ${NAMES[R.pick.mode]}`;
+  $("recSub").innerHTML = R.status === "late"
+    ? `Fastest is the ${esc(NAMES[R.pick.mode])}, arriving <b class="num">${hhmm(R.pick.arrive)}</b>, ${Math.abs(R.pick.slack).toFixed(0)} min after your ${margin}-minute margin. Let them know you're running late.`
+    : `Arrive around <b class="num">${hhmm(R.pick.arrive)}</b>, ${R.pick.slack.toFixed(0)} min before your ${hhmm(R.deadline)} cut-off (target minus ${margin} min).` +
+      (R.status === "taxi" ? " Neither the bus nor the minibus is expected to make it." : "");
+
+  $("boardBody").innerHTML = R.opts.map(o => `<tr class="${o === R.pick ? "best" : ""}">
+      <td><span class="badge b-${o.mode}">${o.mode === "Taxi" ? "TAXI" : o.mode}</span></td>
+      <td class="dest">Hang Hau<small>坑口站</small></td>
+      <td class="num">${o.wait.toFixed(0)}′</td><td class="num">${o.ride.toFixed(0)}′</td>
+      <td class="num">${hhmm(o.arrive)}</td>
+      <td class="st ${o.ok ? "ok" : "late"}">${o === R.pick && o.ok ? '<span class="blink">▶</span> ' : ""}${o.ok ? `ON TIME +${o.slack.toFixed(0)}` : `LATE ${o.slack.toFixed(0)}`}</td></tr>`).join("");
+  $("legend").textContent = `Ride = typical driving time ${R.drive.toFixed(1)} min (${ctx.band.toLowerCase()}${ctx.rain ? ", rain" : ""}${ctx.weekend ? ", weekend" : ""}) + the route's extra minutes. Taxi waiting time is your setting.`;
+
+  const cov = [];
+  const h = ctx.depart.getHours();
+  if (h >= 5 && h < 12) cov.push("We have no trips before 12:00, so morning answers are a rough guess.");
+  if (h < 5) cov.push("Buses and minibuses barely run at this hour. Check the operator apps.");
+  if (ctx.rain) cov.push("Only 10 rainy trips are in our data, so the rain effect is uncertain.");
+  if (q91 > 60 || q11 > 70) cov.push("This queue is longer than any we recorded.");
+  $("coverage").hidden = !cov.length; $("coverage").textContent = cov.join(" ");
+
+  const modes = ["11M", "91M"];
+  if (!tabChosen) activeTab = R.pick.mode === "Taxi" ? "11M" : R.pick.mode;
+  $("tabs").innerHTML = modes.map(m => `<button type="button" class="tab" role="tab" aria-selected="${m === activeTab}" data-tab="${m}">${m}</button>`).join("");
+  drawExplain(R, ctx);
+  drawKNN(R);
+}
+
+function bars(parts, total, label) {
+  const max = Math.max(...parts.map(([, c, x]) => Math.abs(c * x)), 1);
+  return `<div class="bars">` + parts.map(([n, c, x]) => {
+    const v = c * x, w = Math.abs(v) / max * 50;
+    return `<div class="bar"><span>${esc(n)}</span><span class="track"><i class="${v >= 0 ? "pos" : "neg"}" style="${v >= 0 ? `left:50%;width:${w}%` : `left:${50 - w}%;width:${w}%`}"></i></span><span class="v num">${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}</span></div>`;
+  }).join("") + `<div class="bar total"><span>${label}</span><span></span><span class="v num">${total.toFixed(1)} min</span></div></div>`;
+}
+function drawExplain(R, ctx) {
+  const o = R.opts.find(x => x.mode === activeTab);
+  const liveTxt = o.w.live !== undefined ? `The live ETA for that vehicle is ${o.w.live.toFixed(0)} min${o.w.usedLive ? ", later than the model, so we use it" : ""}.` : (ctx.useLive ? "" : "Live ETAs are ignored when you set a leaving time.");
+  $("explain").innerHTML = `
+    <div><h3><span>Waiting in line</span><span class="num">${o.wait.toFixed(1)} min</span></h3>
+      ${bars(o.w.parts, o.w.model, "Model estimate")}
+      <p class="small">Each vehicle you have to let go adds about 7.7 minutes. ${liveTxt}</p></div>
+    <div><h3><span>Ride to Hang Hau</span><span class="num">${o.ride.toFixed(1)} min</span></h3>
+      ${bars(o.e.parts, o.e.extra, "Extra minutes")}
+      <p class="small">Ride = typical driving time ${R.drive.toFixed(1)} min + these extra minutes for stops and boarding. Red bars add time, green bars save time.</p></div>`;
+}
+function drawKNN(R) {
+  if (!KNN) return;
+  $("knnTable").innerHTML = `<tr><th>Route</th><th class="r">Our model</th><th class="r">Nearest trips</th><th>Their waits (min)</th></tr>` +
+    ["11M", "91M"].map(m => { const o = R.opts.find(x => x.mode === m);
+      const k = KNN.predict([o.w.vn, o.w.hw, m === "91M" ? 1 : 0]);
+      return `<tr><td><span class="badge b-${m}">${m}</span></td><td class="r">${o.w.model.toFixed(1)} min</td><td class="r">${k.wait.toFixed(1)} min</td><td>${k.nn.map(n => n.p.y.toFixed(0)).join(" · ")}</td></tr>`; }).join("");
+  $("knnNote").textContent = `${KNN.n} past trips loaded. On our test trips the regression model was more accurate (±4.8 vs ±5.0 min), so the advice uses the regression.`;
+}
+
+// ============================== INIT ==============================
+(function init() {
+  const now = new Date();
+  $("target").value = hhmm(addMin(now, 40));
+  $("margin").value = CONFIG.defaultSafetyMargin; $("taxiWait").value = CONFIG.defaultTaxiWait;
+  const tick = () => { const d = new Date(); $("clock").textContent = `${d.toLocaleDateString("en-HK", { weekday: "short" })} ${hhmm(d)}`; };
+  tick(); setInterval(tick, 10000);
+  $("plan").addEventListener("submit", e => { e.preventDefault(); run(); });
+  $("plan").addEventListener("input", run);
+  ["m91", "m11", "rainOverride"].forEach(id => $(id).addEventListener("input", run));
+  document.querySelectorAll("[data-step]").forEach(b => b.addEventListener("click", () => {
+    const [id, d] = b.dataset.step.split(":"); $(id).value = Math.max(0, (+$(id).value || 0) + +d); run(); }));
+  $("tabs").addEventListener("click", e => { const t = e.target.closest("[data-tab]"); if (t) { activeTab = t.dataset.tab; tabChosen = true; run(); } });
+  $("refresh").addEventListener("click", () => loadLive().then(run));
+  $("csv").addEventListener("change", e => { const f = e.target.files[0]; if (!f) return;
+    Papa.parse(f, { header: true, skipEmptyLines: true, complete: res => { KNN = buildKNN(res.data); if (KNN) { $("knnUpload").hidden = true; run(); } } }); });
+  fetch("model_data.csv").then(r => { if (!r.ok) throw 0; return r.text(); })
+    .then(t => { KNN = buildKNN(Papa.parse(t, { header: true, skipEmptyLines: true }).data); if (!KNN) throw 0; run(); })
+    .catch(() => { $("knnTable").innerHTML = ""; $("knnUpload").hidden = false; });
+  run();
+  loadLive().then(run);
+})();
+</script>
+
+</body>
+</html>
