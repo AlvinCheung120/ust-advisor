@@ -250,9 +250,9 @@ footer { font-size: 12px; color: var(--muted); }
     <section class="panel" aria-label="How good is the model">
       <h2>How accurate is it?</h2>
       <div class="stats">
-        <div class="stat"><b class="num">±4.8 min</b><span>typical waiting-time error (RMSE, 38 test trips)</span></div>
-        <div class="stat"><b class="num">0.51</b><span>R² for waiting time (simple rule: 0.41)</span></div>
-        <div class="stat"><b class="num">±1.8 min</b><span>typical ride-time error</span></div>
+        <div class="stat"><b class="num">±4.6 min</b><span>typical waiting-time error (RMSE, 38 test trips)</span></div>
+        <div class="stat"><b class="num">0.55</b><span>R² for waiting time (simple rule also 0.56)</span></div>
+        <div class="stat"><b class="num">±1.6 min</b><span>typical ride-time error</span></div>
         <div class="stat"><b class="num">186</b><span>trips used: 2 observed, 184 simulated from our ETA logger</span></div>
       </div>
       <footer>Models trained in KNIME (linear regression; MLP and KNN compared). Driving time is a typical value from our data, not live traffic. Few rainy trips in the data, so the rain effect is uncertain. Live data: KMB and Transport Department ETA APIs and the Hong Kong Observatory via DATA.GOV.HK. COMP1945 Group 23.</footer>
@@ -263,13 +263,13 @@ footer { font-size: 12px; color: var(--muted); }
 <script>
 // ============================== CONFIG (from KNIME) ==============================
 const CONFIG = {
-  capacity: { "11M": 16, "91M": 30 },
+  capacity: { "11M": 16, "91M": 60 },   // 11M seats; free spaces on an arriving 91M double-decker (~120-130 total, part-full)
   headway: {
     "91M": { "Off-peak": [16.0, 15.0], "Evening peak": [13.7, 16.0], "Late": [18.6, 21.0] },
     "11M": { "Off-peak": [7.0, 7.0],  "Evening peak": [8.0, 8.0],  "Late": [8.0, 7.5] } },
   typicalDrive: { "Off-peak": 9, "Evening peak": 10.5, "Late": 8 },
-  waitModel:  { intercept: -1.849, vehicles_needed: 7.693, typical_headway: -0.421, is_91M: 11.157 },
-  extraModel: { intercept: 2.281, is_91M: 3.283, is_rain: 0.975, evening_peak: 0.195, late: -1.369, is_weekend: -1.610 },
+  waitModel:  { intercept: -4.391, vehicles_needed: 7.483, is_91M: 5.049 },
+  extraModel: { intercept: 2.367, is_91M: 3.477, evening_peak: -0.287, late: -1.402 },
   defaultSafetyMargin: 3, defaultTaxiWait: 5, knnK: 7,
   api: {
     kmb: "https://data.etabus.gov.hk/v1/transport/kmb/eta/B3E60EE895DBBF06/91M/1",
@@ -290,8 +290,7 @@ function vehiclesNeeded(q, mode) { return Math.ceil((q + 1) / CONFIG.capacity[mo
 function typicalHeadway(mode, ctx) { return CONFIG.headway[mode][ctx.band][ctx.weekend]; }
 function predictWait(mode, q, ctx) {
   const m = CONFIG.waitModel, vn = vehiclesNeeded(q, mode), hw = typicalHeadway(mode, ctx), is91 = mode === "91M" ? 1 : 0;
-  const parts = [["Base", m.intercept, 1], [`Vehicles needed (${vn})`, m.vehicles_needed, vn],
-    [`Gap between vehicles (${hw} min)`, m.typical_headway, hw], ["Route is 91M", m.is_91M, is91]];
+  const parts = [["Base", m.intercept, 1], [`Vehicles needed (${vn})`, m.vehicles_needed, vn], ["Route is 91M", m.is_91M, is91]];
   const model = Math.max(0, parts.reduce((s, [, c, x]) => s + c * x, 0));
   const live = ctx.useLive ? (ctx.eta[mode] || [])[vn - 1] : undefined;
   const wait = live !== undefined ? Math.max(model, live) : model;
@@ -299,9 +298,8 @@ function predictWait(mode, q, ctx) {
 }
 function predictExtra(mode, ctx) {
   const m = CONFIG.extraModel;
-  const parts = [["Base", m.intercept, 1], ["Route is 91M", m.is_91M, mode === "91M" ? 1 : 0], ["Raining", m.is_rain, ctx.rain],
-    ["Evening peak", m.evening_peak, ctx.band === "Evening peak" ? 1 : 0], ["Late evening", m.late, ctx.band === "Late" ? 1 : 0],
-    ["Weekend", m.is_weekend, ctx.weekend]];
+  const parts = [["Base", m.intercept, 1], ["Route is 91M", m.is_91M, mode === "91M" ? 1 : 0],
+    ["Evening peak", m.evening_peak, ctx.band === "Evening peak" ? 1 : 0], ["Late evening", m.late, ctx.band === "Late" ? 1 : 0]];
   return { extra: Math.max(0, parts.reduce((s, [, c, x]) => s + c * x, 0)), parts };
 }
 function typicalDrive(ctx) { return CONFIG.typicalDrive[ctx.band] + (ctx.rain ? 1 : 0); }
@@ -323,13 +321,13 @@ function recommend(ctx, q91, q11, target, margin, taxiWait) {
   return { opts, pick, status, drive, deadline };
 }
 
-// KNN (L5): min-max scaled [vehicles_needed, typical_headway, is_91M], Euclidean distance, mean wait of K nearest
+// KNN (L5): min-max scaled [vehicles_needed, is_91M], Euclidean distance, mean wait of K nearest
 let KNN = null;
 function buildKNN(rows) {
-  const pts = rows.map(r => ({ x: [+r.vehicles_needed, +r.typical_headway, r.mode === "91M" ? 1 : 0], y: +r.wait_min }))
+  const pts = rows.map(r => ({ x: [+r.vehicles_needed, r.mode === "91M" ? 1 : 0], y: +r.wait_min }))
     .filter(p => p.x.every(Number.isFinite) && Number.isFinite(p.y));
   if (!pts.length) return null;
-  const lo = [0, 1, 2].map(i => Math.min(...pts.map(p => p.x[i]))), hi = [0, 1, 2].map(i => Math.max(...pts.map(p => p.x[i])));
+  const lo = [0, 1].map(i => Math.min(...pts.map(p => p.x[i]))), hi = [0, 1].map(i => Math.max(...pts.map(p => p.x[i])));
   const sc = x => x.map((v, i) => (v - lo[i]) / ((hi[i] - lo[i]) || 1));
   pts.forEach(p => p.s = sc(p.x));
   return { n: pts.length, predict(x) {
@@ -366,7 +364,7 @@ async function loadLive() {
   } else {
     $("livePill").textContent = "Offline";
     ["eta91", "eta11", "rainTxt", "warnTxt"].forEach(id => $(id).textContent = "not available here");
-    $("liveNote").textContent = "This page can't reach the bus and weather servers from here. Type the next arrival from the KMB or minibus app if you have it; the model works without it.";
+    $("liveNote").innerHTML = 'This copy can\'t reach the bus and weather servers. Open the <a href="https://alvincheung120.github.io/ust-advisor/" target="_blank" rel="noopener">live version</a> for real-time ETAs, or type the next arrival from the KMB or minibus app below.';
     $("manual").hidden = false;
   }
 }
@@ -393,7 +391,7 @@ function drawQueue(mode, q) {
   const cap = CONFIG.capacity[mode], vn = vehiclesNeeded(q, mode), id = mode === "91M" ? "91" : "11";
   const shown = Math.min(vn, 8);
   $("v" + id).innerHTML = Array.from({ length: shown }, (_, i) => `<span class="veh ${i === shown - 1 ? "mine" : "full"}" title="${i === shown - 1 ? "Your vehicle" : "Fills before you"}"></span>`).join("") + (vn > 8 ? `<span class="hint">…${vn} vehicles</span>` : "");
-  $("n" + id).textContent = vn === 1 ? `You fit on the next ${mode === "91M" ? "bus" : "minibus"} (${cap} ${mode === "91M" ? "free spaces assumed" : "seats"}).`
+  $("n" + id).textContent = vn === 1 ? `You fit on the next ${mode === "91M" ? "bus" : "minibus"} (${cap} ${mode === "91M" ? "free spaces assumed on the double-decker" : "seats"}).`
     : `${vn - 1} ${mode === "91M" ? "bus" : "minibus"}${vn > 2 ? "es" : ""} fill${vn === 2 ? "s" : ""} up before you. You board #${vn}.`;
 }
 
@@ -409,7 +407,7 @@ function run() {
   const R = recommend(ctx, q91, q11, target, margin, taxiWait); lastR = R;
 
   $("verdict").style.background = R.status === "late" ? "var(--v-late)" : `var(--v-${R.pick.mode})`;
-  $("recTitle").textContent = R.status === "late" ? "You'll be late either way" : `Take the ${NAMES[R.pick.mode]}`;
+  $("recTitle").textContent = R.status === "late" ? "You'll be late either way" : (R.pick.mode === "Taxi" ? "Take a taxi" : `Take the ${NAMES[R.pick.mode]}`);
   $("recSub").innerHTML = R.status === "late"
     ? `Fastest is the ${esc(NAMES[R.pick.mode])}, arriving <b class="num">${hhmm(R.pick.arrive)}</b>, ${Math.abs(R.pick.slack).toFixed(0)} min after your ${margin}-minute margin. Let them know you're running late.`
     : `Arrive around <b class="num">${hhmm(R.pick.arrive)}</b>, ${R.pick.slack.toFixed(0)} min before your ${hhmm(R.deadline)} cut-off (target minus ${margin} min).` +
@@ -427,7 +425,7 @@ function run() {
   const h = ctx.depart.getHours();
   if (h >= 5 && h < 12) cov.push("We have no trips before 12:00, so morning answers are a rough guess.");
   if (h < 5) cov.push("Buses and minibuses barely run at this hour. Check the operator apps.");
-  if (ctx.rain) cov.push("Only 10 rainy trips are in our data, so the rain effect is uncertain.");
+  if (ctx.rain) cov.push("Rain: we add 1 minute of driving time. Only 10 rainy trips are in our data, too few for the model to learn more.");
   if (q91 > 60 || q11 > 70) cov.push("This queue is longer than any we recorded.");
   $("coverage").hidden = !cov.length; $("coverage").textContent = cov.join(" ");
 
@@ -451,7 +449,7 @@ function drawExplain(R, ctx) {
   $("explain").innerHTML = `
     <div><h3><span>Waiting in line</span><span class="num">${o.wait.toFixed(1)} min</span></h3>
       ${bars(o.w.parts, o.w.model, "Model estimate")}
-      <p class="small">Each vehicle you have to let go adds about 7.7 minutes. ${liveTxt}</p></div>
+      <p class="small">Each vehicle you have to let go adds about 7.5 minutes; the 91M adds about 5 minutes because buses come less often. ${liveTxt}</p></div>
     <div><h3><span>Ride to Hang Hau</span><span class="num">${o.ride.toFixed(1)} min</span></h3>
       ${bars(o.e.parts, o.e.extra, "Extra minutes")}
       <p class="small">Ride = typical driving time ${R.drive.toFixed(1)} min + these extra minutes for stops and boarding. Red bars add time, green bars save time.</p></div>`;
@@ -460,9 +458,9 @@ function drawKNN(R) {
   if (!KNN) return;
   $("knnTable").innerHTML = `<tr><th>Route</th><th class="r">Our model</th><th class="r">Nearest trips</th><th>Their waits (min)</th></tr>` +
     ["11M", "91M"].map(m => { const o = R.opts.find(x => x.mode === m);
-      const k = KNN.predict([o.w.vn, o.w.hw, m === "91M" ? 1 : 0]);
+      const k = KNN.predict([o.w.vn, m === "91M" ? 1 : 0]);
       return `<tr><td><span class="badge b-${m}">${m}</span></td><td class="r">${o.w.model.toFixed(1)} min</td><td class="r">${k.wait.toFixed(1)} min</td><td>${k.nn.map(n => n.p.y.toFixed(0)).join(" · ")}</td></tr>`; }).join("");
-  $("knnNote").textContent = `${KNN.n} past trips loaded. On our test trips the regression model was more accurate (±4.8 vs ±5.0 min), so the advice uses the regression.`;
+  $("knnNote").textContent = `${KNN.n} past trips loaded. On our test trips the regression model was more accurate (±4.6 vs ±5.7 min), so the advice uses the regression.`;
 }
 
 // ============================== INIT ==============================
