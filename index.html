@@ -3,16 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<style>[hidden]{display:none!important} body{margin:0} img{max-width:100%}</style>
-</head>
-<body>
 <title>UST → Hang Hau Advisor</title>
-<meta name="claude:viewport-fit-sides" content="cover">
+<style>[hidden]{display:none!important} body{margin:0} img{max-width:100%}</style>
 <!--
   Bus, Minibus or Taxi? – HKUST North → Hang Hau departure advisor · COMP1945 Group 23
   Local run: `python3 -m http.server 8000` in this folder, open http://localhost:8000 (live ETAs work there).
   Published as a claude.ai artifact, outside APIs are blocked by the page sandbox, so the page falls back
   to typed-in ETAs. Model coefficients come from the KNIME Linear Regression Learner (../knime/results.md).
+  Built from ../prompts/app_prompt.md. Data: 53 real trips recorded by the team, 19 Oct - 13 Nov 2026.
 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -156,7 +154,8 @@ details.more .row { margin-top: 12px; }
 .stat span { font-size: 12px; color: var(--muted); }
 footer { font-size: 12px; color: var(--muted); }
 </style>
-
+</head>
+<body>
 <header class="sign">
   <div class="wrap">
     <div class="route">
@@ -241,7 +240,7 @@ footer { font-size: 12px; color: var(--muted); }
 
     <section class="panel" aria-label="Model comparison">
       <h2>Second opinion: nearest past trips</h2>
-      <p class="small">K-nearest neighbours finds the 7 past trips most like yours (same route, same queue size, same time of day) and averages how long those people waited.</p>
+      <p class="small">K-nearest neighbours finds the 5 real trips most like yours (same route, similar queue, same time of day) and averages how long those people waited.</p>
       <div class="scroll"><table class="compare num" id="knnTable"><tr><td>Loading past trips…</td></tr></table></div>
       <p class="hint" id="knnNote" style="margin:0"></p>
       <label class="field" id="knnUpload" hidden><span>Load <code>model_data.csv</code> to switch this on</span><input type="file" id="csv" accept=".csv"></label>
@@ -250,12 +249,13 @@ footer { font-size: 12px; color: var(--muted); }
     <section class="panel" aria-label="How good is the model">
       <h2>How accurate is it?</h2>
       <div class="stats">
-        <div class="stat"><b class="num">±4.6 min</b><span>typical waiting-time error (RMSE, 38 test trips)</span></div>
-        <div class="stat"><b class="num">0.55</b><span>R² for waiting time (simple rule also 0.56)</span></div>
-        <div class="stat"><b class="num">±1.6 min</b><span>typical ride-time error</span></div>
-        <div class="stat"><b class="num">186</b><span>trips used: 2 observed, 184 simulated from our ETA logger</span></div>
+        <div class="stat"><b class="num">±5.9 min</b><span>typical waiting-time error (RMSE, 11 test trips)</span></div>
+        <div class="stat"><b class="num">±5.5 min</b><span>the simple "vehicles × gap" rule did about as well (R² 0.13 vs 0.00)</span></div>
+        <div class="stat"><b class="num">97%</b><span>of "on time" calls were right at a 3-min margin (rule: 94%)</span></div>
+        <div class="stat"><b class="num">53</b><span>real trips collected by the team between 19 Oct and 13 Nov 2026</span></div>
       </div>
-      <footer>Models trained in KNIME (linear regression; MLP and KNN compared). Driving time is a typical value from our data, not live traffic. Few rainy trips in the data, so the rain effect is uncertain. Live data: KMB and Transport Department ETA APIs and the Hong Kong Observatory via DATA.GOV.HK. COMP1945 Group 23.</footer>
+      <p class="small" style="margin:0">Honest reading: with 53 trips, no model clearly beats the simple rule. The waits vary a lot (two 91M riders with 3 people ahead waited 18–19 min). We use the regression because it was less likely to say "on time" wrongly. Treat every time as ± 6 minutes and keep the safety margin.</p>
+      <footer>Models trained in KNIME (linear regression; MLP and KNN compared) on the first 42 trips, tested on the last 11. Driving time is the typical Google Maps time in our trips, not live traffic. No taxi trips were recorded, so the taxi time is your setting plus driving time. Live data: KMB and Transport Department ETA APIs and the Hong Kong Observatory via DATA.GOV.HK. COMP1945 Group 23.</footer>
     </section>
   </section>
 </main>
@@ -265,12 +265,13 @@ footer { font-size: 12px; color: var(--muted); }
 const CONFIG = {
   capacity: { "11M": 16, "91M": 60 },   // 11M seats; free spaces on an arriving 91M double-decker (~120-130 total, part-full)
   headway: {
-    "91M": { "Off-peak": [16.0, 15.0], "Evening peak": [13.7, 16.0], "Late": [18.6, 21.0] },
-    "11M": { "Off-peak": [7.0, 7.0],  "Evening peak": [8.0, 8.0],  "Late": [8.0, 7.5] } },
-  typicalDrive: { "Off-peak": 9, "Evening peak": 10.5, "Late": 8 },
-  waitModel:  { intercept: -4.391, vehicles_needed: 7.483, is_91M: 5.049 },
-  extraModel: { intercept: 2.367, is_91M: 3.477, evening_peak: -0.287, late: -1.402 },
-  defaultSafetyMargin: 3, defaultTaxiWait: 5, knnK: 7,
+    // median gap between departures at HKUST North, real ETA logger 7-14 Nov [weekday, weekend]
+    "91M": { "Off-peak": [16.0, 14.3], "Evening peak": [13.2, 16.7], "Late": [14.9, 20.4] },
+    "11M": { "Off-peak": [5.9, 6.1],  "Evening peak": [4.0, 4.1],  "Late": [5.0, 6.8] } },
+  typicalDrive: { "Off-peak": 8, "Evening peak": 9, "Late": 7 },   // median Google Maps time in our trips
+  waitModel:  { intercept: 0.272, vehicles_needed: 5.210, is_91M: 4.768, evening_peak: -6.369 },
+  extraModel: { intercept: 6.467, is_91M: 2.330 },
+  defaultSafetyMargin: 3, defaultTaxiWait: 5, knnK: 5,
   api: {
     kmb: "https://data.etabus.gov.hk/v1/transport/kmb/eta/B3E60EE895DBBF06/91M/1",
     gmb: "https://data.etagmb.gov.hk/eta/route-stop/2004825/2/1",
@@ -290,7 +291,8 @@ function vehiclesNeeded(q, mode) { return Math.ceil((q + 1) / CONFIG.capacity[mo
 function typicalHeadway(mode, ctx) { return CONFIG.headway[mode][ctx.band][ctx.weekend]; }
 function predictWait(mode, q, ctx) {
   const m = CONFIG.waitModel, vn = vehiclesNeeded(q, mode), hw = typicalHeadway(mode, ctx), is91 = mode === "91M" ? 1 : 0;
-  const parts = [["Base", m.intercept, 1], [`Vehicles needed (${vn})`, m.vehicles_needed, vn], ["Route is 91M", m.is_91M, is91]];
+  const parts = [["Base", m.intercept, 1], [`Vehicles needed (${vn})`, m.vehicles_needed, vn], ["Route is 91M", m.is_91M, is91],
+    ["Evening peak (17:00–19:44)", m.evening_peak, ctx.band === "Evening peak" ? 1 : 0]];
   const model = Math.max(0, parts.reduce((s, [, c, x]) => s + c * x, 0));
   const live = ctx.useLive ? (ctx.eta[mode] || [])[vn - 1] : undefined;
   const wait = live !== undefined ? Math.max(model, live) : model;
@@ -298,11 +300,10 @@ function predictWait(mode, q, ctx) {
 }
 function predictExtra(mode, ctx) {
   const m = CONFIG.extraModel;
-  const parts = [["Base", m.intercept, 1], ["Route is 91M", m.is_91M, mode === "91M" ? 1 : 0],
-    ["Evening peak", m.evening_peak, ctx.band === "Evening peak" ? 1 : 0], ["Late evening", m.late, ctx.band === "Late" ? 1 : 0]];
+  const parts = [["Base", m.intercept, 1], ["Route is 91M", m.is_91M, mode === "91M" ? 1 : 0]];
   return { extra: Math.max(0, parts.reduce((s, [, c, x]) => s + c * x, 0)), parts };
 }
-function typicalDrive(ctx) { return CONFIG.typicalDrive[ctx.band] + (ctx.rain ? 1 : 0); }
+function typicalDrive(ctx) { return CONFIG.typicalDrive[ctx.band]; }
 function recommend(ctx, q91, q11, target, margin, taxiWait) {
   const drive = typicalDrive(ctx);
   const opts = ["11M", "91M"].map(mode => {
@@ -321,13 +322,16 @@ function recommend(ctx, q91, q11, target, margin, taxiWait) {
   return { opts, pick, status, drive, deadline };
 }
 
-// KNN (L5): min-max scaled [vehicles_needed, is_91M], Euclidean distance, mean wait of K nearest
+// KNN (L5): min-max scaled [queue_len, is_91M, evening_peak, late], Euclidean distance, mean wait of K nearest
 let KNN = null;
+const knnX = (q, mode, band) => [q, mode === "91M" ? 1 : 0, band === "Evening peak" ? 1 : 0, band === "Late" ? 1 : 0];
 function buildKNN(rows) {
-  const pts = rows.map(r => ({ x: [+r.vehicles_needed, r.mode === "91M" ? 1 : 0], y: +r.wait_min }))
+  const pts = rows.filter(r => r.wait_min !== undefined && r.wait_min !== "")
+    .map(r => ({ x: knnX(+r.queue_len, r.mode, r.time_band), y: +r.wait_min, r }))
     .filter(p => p.x.every(Number.isFinite) && Number.isFinite(p.y));
   if (!pts.length) return null;
-  const lo = [0, 1].map(i => Math.min(...pts.map(p => p.x[i]))), hi = [0, 1].map(i => Math.max(...pts.map(p => p.x[i])));
+  const idx = [0, 1, 2, 3];
+  const lo = idx.map(i => Math.min(...pts.map(p => p.x[i]))), hi = idx.map(i => Math.max(...pts.map(p => p.x[i])));
   const sc = x => x.map((v, i) => (v - lo[i]) / ((hi[i] - lo[i]) || 1));
   pts.forEach(p => p.s = sc(p.x));
   return { n: pts.length, predict(x) {
@@ -364,7 +368,7 @@ async function loadLive() {
   } else {
     $("livePill").textContent = "Offline";
     ["eta91", "eta11", "rainTxt", "warnTxt"].forEach(id => $(id).textContent = "not available here");
-    $("liveNote").innerHTML = 'This copy can\'t reach the bus and weather servers. Open the <a href="https://alvincheung120.github.io/ust-advisor/" target="_blank" rel="noopener">live version</a> for real-time ETAs, or type the next arrival from the KMB or minibus app below.';
+    $("liveNote").textContent = "This copy can't reach the bus and weather servers. Open the hosted version for real-time ETAs, or type the next arrival from the KMB or minibus app below.";
     $("manual").hidden = false;
   }
 }
@@ -404,7 +408,7 @@ function run() {
   let target = atTime($("target").value, ctx.depart);
   if (target < ctx.depart) target = addMin(target, 24 * 60);
   const margin = Math.max(0, +$("margin").value || 0), taxiWait = Math.max(0, +$("taxiWait").value || 0);
-  const R = recommend(ctx, q91, q11, target, margin, taxiWait); lastR = R;
+  const R = recommend(ctx, q91, q11, target, margin, taxiWait); Object.assign(R, { q91, q11, band: ctx.band }); lastR = R;
 
   $("verdict").style.background = R.status === "late" ? "var(--v-late)" : `var(--v-${R.pick.mode})`;
   $("recTitle").textContent = R.status === "late" ? "You'll be late either way" : (R.pick.mode === "Taxi" ? "Take a taxi" : `Take the ${NAMES[R.pick.mode]}`);
@@ -419,14 +423,14 @@ function run() {
       <td class="num">${o.wait.toFixed(0)}′</td><td class="num">${o.ride.toFixed(0)}′</td>
       <td class="num">${hhmm(o.arrive)}</td>
       <td class="st ${o.ok ? "ok" : "late"}">${o === R.pick && o.ok ? '<span class="blink">▶</span> ' : ""}${o.ok ? `ON TIME +${o.slack.toFixed(0)}` : `LATE ${o.slack.toFixed(0)}`}</td></tr>`).join("");
-  $("legend").textContent = `Ride = typical driving time ${R.drive.toFixed(1)} min (${ctx.band.toLowerCase()}${ctx.rain ? ", rain" : ""}${ctx.weekend ? ", weekend" : ""}) + the route's extra minutes. Taxi waiting time is your setting.`;
+  $("legend").textContent = `Ride = typical driving time ${R.drive.toFixed(1)} min (${ctx.band.toLowerCase()}${ctx.weekend ? ", weekend" : ""}) + the route's extra minutes. Taxi waiting time is your setting.`;
 
   const cov = [];
   const h = ctx.depart.getHours();
-  if (h >= 5 && h < 12) cov.push("We have no trips before 12:00, so morning answers are a rough guess.");
+  if (h >= 5 && h < 12) cov.push("Only one of our trips started before 12:00, so morning answers are a rough guess.");
   if (h < 5) cov.push("Buses and minibuses barely run at this hour. Check the operator apps.");
-  if (ctx.rain) cov.push("Rain: we add 1 minute of driving time. Only 10 rainy trips are in our data, too few for the model to learn more.");
-  if (q91 > 60 || q11 > 70) cov.push("This queue is longer than any we recorded.");
+  if (ctx.rain) cov.push("It's raining. Only 4 of our trips were in rain, too few to learn a rain effect, so allow extra time.");
+  if (q91 > 20 || q11 > 59) cov.push("This queue is longer than any we recorded (91M: 20, 11M: 59), so the estimate is less reliable.");
   $("coverage").hidden = !cov.length; $("coverage").textContent = cov.join(" ");
 
   const modes = ["11M", "91M"];
@@ -449,18 +453,18 @@ function drawExplain(R, ctx) {
   $("explain").innerHTML = `
     <div><h3><span>Waiting in line</span><span class="num">${o.wait.toFixed(1)} min</span></h3>
       ${bars(o.w.parts, o.w.model, "Model estimate")}
-      <p class="small">Each vehicle you have to let go adds about 7.5 minutes; the 91M adds about 5 minutes because buses come less often. ${liveTxt}</p></div>
+      <p class="small">Each vehicle you have to wait for adds about 5 minutes; the 91M adds about 5 more because buses come less often, and the evening peak is about 6 minutes quicker (minibuses run every ~4 min then). ${liveTxt}</p></div>
     <div><h3><span>Ride to Hang Hau</span><span class="num">${o.ride.toFixed(1)} min</span></h3>
       ${bars(o.e.parts, o.e.extra, "Extra minutes")}
-      <p class="small">Ride = typical driving time ${R.drive.toFixed(1)} min + these extra minutes for stops and boarding. Red bars add time, green bars save time.</p></div>`;
+      <p class="small">Ride = typical Google Maps driving time ${R.drive.toFixed(1)} min + these extra minutes for stops and boarding. The 91M takes about 2.3 min longer than the minibus.</p></div>`;
 }
 function drawKNN(R) {
   if (!KNN) return;
   $("knnTable").innerHTML = `<tr><th>Route</th><th class="r">Our model</th><th class="r">Nearest trips</th><th>Their waits (min)</th></tr>` +
     ["11M", "91M"].map(m => { const o = R.opts.find(x => x.mode === m);
-      const k = KNN.predict([o.w.vn, m === "91M" ? 1 : 0]);
-      return `<tr><td><span class="badge b-${m}">${m}</span></td><td class="r">${o.w.model.toFixed(1)} min</td><td class="r">${k.wait.toFixed(1)} min</td><td>${k.nn.map(n => n.p.y.toFixed(0)).join(" · ")}</td></tr>`; }).join("");
-  $("knnNote").textContent = `${KNN.n} past trips loaded. On our test trips the regression model was more accurate (±4.6 vs ±5.7 min), so the advice uses the regression.`;
+      const k = KNN.predict(knnX(m === "91M" ? R.q91 : R.q11, m, R.band));
+      return `<tr><td><span class="badge b-${m}">${m}</span></td><td class="r">${o.w.model.toFixed(1)} min</td><td class="r">${k.wait.toFixed(1)} min</td><td>${k.nn.map(n => `<span title="${esc(n.p.r.date)}, ${n.p.r.queue_len} ahead, ${esc(n.p.r.time_band)}">${n.p.y.toFixed(0)}</span>`).join(" · ")}</td></tr>`; }).join("");
+  $("knnNote").textContent = `${KNN.n} real trips loaded. On our 11 test trips both were about equally accurate (regression ±5.9, KNN ±5.6 min), so treat a big gap between the two as a sign of uncertainty.`;
 }
 
 // ============================== INIT ==============================
